@@ -1,4 +1,7 @@
 *.ipk
+*.apk
+.env
+*.env
 bin/
 build/
 *.swp

@@ -2,12 +2,21 @@
   "luci-app-podkop-subscriptions": {
     "description": "Grant access to Podkop subscription settings",
     "read": {
-      "uci": [ "podkop-subscriptions", "podkop" ],
-      "file": { "/etc/podkop-subscriptions/status": [ "read" ] }
+      "uci": [ "podkop-subscriptions" ],
+      "file": {
+        "/etc/podkop-subscriptions/status": [ "read" ],
+        "/etc/podkop-subscriptions/source-*.status": [ "read" ],
+        "/etc/podkop-subscriptions/source-*.preview": [ "read" ]
+      }
     },
     "write": {
       "uci": [ "podkop-subscriptions" ],
-      "ubus": { "file": [ "exec" ] }
+      "ubus": { "file": [ "exec" ] },
+      "file": {
+        "/usr/sbin/podkop-subscriptions request-update": [ "exec" ],
+        "/usr/sbin/podkop-subscriptions update-state": [ "exec" ],
+        "/usr/sbin/podkop-subscriptions check": [ "exec" ]
+      }
     }
   }
 }

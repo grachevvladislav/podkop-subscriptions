@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=podkop-subscriptions
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=MIT
 
 include $(INCLUDE_DIR)/package.mk
@@ -11,7 +11,7 @@ define Package/podkop-subscriptions
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Subscription updater for Podkop URLTest
-  DEPENDS:=+podkop +sing-box +curl +jq +ca-bundle
+  DEPENDS:=+podkop +sing-box +curl +jq +ca-bundle +flock +coreutils-base64
 endef
 
 define Package/podkop-subscriptions/description
@@ -19,6 +19,10 @@ Safely updates Podkop's main URLTest links from HTTPS subscriptions.
 endef
 
 define Build/Compile
+endef
+
+define Package/podkop-subscriptions/conffiles
+/etc/config/podkop-subscriptions
 endef
 
 define Package/podkop-subscriptions/install

@@ -5,6 +5,14 @@ UPDATER=/usr/libexec/podkop-subscriptions/update
 
 case "${1:-}" in
 	update) exec "$UPDATER" update ;;
+	request-update) umask 077; : >/tmp/podkop-subscriptions.request ;;
+	update-state)
+		if [ -e /tmp/podkop-subscriptions.request ] || ! flock -n /tmp/podkop-subscriptions.guard true; then
+			echo busy
+		else
+			echo idle
+		fi
+		;;
 	check) exec "$UPDATER" check ;;
 	status) exec "$UPDATER" status ;;
 	daemon) exec "$UPDATER" daemon ;;

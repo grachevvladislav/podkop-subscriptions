@@ -1,36 +1,82 @@
-# podkop-subscriptions
+# Podkop Subscriptions
 
-OpenWrt/LuCI module that keeps Podkop's single URLTest section populated from
-HTTPS subscriptions.  It downloads plain or Base64-encoded share links,
-decodes links with the installed `sing-box`, filters them, validates a
-candidate configuration, and only then applies it.
+[![Сборка APK](https://github.com/grachevvladislav/podkop-subscriptions/actions/workflows/build.yml/badge.svg)](https://github.com/grachevvladislav/podkop-subscriptions/actions/workflows/build.yml)
+[![Последний выпуск](https://img.shields.io/github/v/release/grachevvladislav/podkop-subscriptions)](https://github.com/grachevvladislav/podkop-subscriptions/releases/latest)
 
-## Safety model
+Дополнение для OpenWrt и LuCI, которое обновляет список подключений в секции
+`main` Podkop. Добавь HTTPS-ссылки на подписки, настрой фильтры и расписание.
+Модуль поддерживает текстовые и Base64-списки и передаёт ссылки установленному
+движку sing-box для разбора.
 
-* the current working configuration is retained for every failed download,
-  empty filtered result, or failed validation;
-* invalid individual links are skipped and reported;
-* source URLs and links are never written to syslog;
-* all state is root-readable only;
-* a lock prevents concurrent manual and scheduled updates;
-* a restart is performed only after a semantic change in decoded outbounds.
+## Установка одной командой
 
-The package owns `podkop.main.urltest_proxy_links`. Do not edit that option by
-hand while subscriptions are enabled.
+Для сборки под **OpenWrt 25.12, mediatek/filogic, aarch64_cortex-a53**
+нужны уже установленный Podkop 0.7.24 с режимом **URLTest** в секции `main`
+и движок с командой `sing-box tools decode-link`, например podkop-engine.
+Обычный sing-box из репозитория OpenWrt может не содержать эту команду.
 
-## Development
-
-Run the portable test suite:
+Подключись к своему роутеру по SSH и выполни от `root`:
 
 ```sh
-make test
+wget -qO- https://raw.githubusercontent.com/grachevvladislav/podkop-subscriptions/main/install.sh | sh
 ```
 
-Build an `.ipk` with the OpenWrt SDK image selected in `docker/Makefile`:
+Установщик проверяет версию OpenWrt и архитектуру, скачивает два APK из
+[последнего выпуска](https://github.com/grachevvladislav/podkop-subscriptions/releases/latest)
+и сверяет SHA-256. Пакеты опубликованы в GitHub Releases, поэтому при установке
+используется `apk add --allow-untrusted`. Исходник установщика доступен в
+[`install.sh`](install.sh). Для OpenWrt с `opkg` эти APK не подходят.
+
+Открой **Services → Podkop subscriptions** в LuCI, добавь источник и нажми
+**Save**. Новый источник опрашивается автоматически. Для повторного опроса
+всех включённых источников нажми **Update now**. Кнопка **Check configuration**
+скачивает источники и проверяет кандидатную конфигурацию без применения.
+
+Модуль управляет полем **URLTest Proxy Links** секции `main`. Если уже работает
+старый обновлятор того же поля, отключи задачу старого обновлятора перед первым
+применением. Исходные настройки и ссылки можно сохранить резервной копией.
+
+## Как работают фильтры и обновление
+
+- Фильтры применяются отдельно к каждой включённой подписке. `Include name regex`
+  ограничивает список совпадениями. `Exclude name regex` и `Exclude country codes`
+  исключают совпавшие записи. В предпросмотре исключённые строки идут первыми.
+- Коды стран вводятся через пробел, например `RU DE`. Модуль ищет флаги в
+  декодированных названиях серверов. Для `RU`, `US`, `DE`, `NL` и `FI`
+  также проверяются известные варианты названий стран. IP и домены в поиске
+  по стране не участвуют.
+- Для одинакового результата в LuCI и на роутере используй выражения,
+  совместимые с JavaScript и POSIX ERE, например `Berlin|Frankfurt` или
+  `^🇷🇺`. Предпросмотр проверяет имена в браузере, а роутер использует `grep -E`.
+- После фильтрации одинаковые подключения объединяются. Название сервера
+  не влияет на сравнение. Разные ключи, транспорт или параметры остаются
+  отдельными подключениями.
+- `Retry through Podkop proxy` повторяет неудачную прямую загрузку через
+  локальный HTTP-прокси Podkop, если он доступен.
+- Если источник недоступен, обход продолжается и статусы остальных источников
+  обновляются. Общий список сохраняется прежним при ошибке, пустом результате
+  или невалидной конфигурации. Отдельные неразбираемые ссылки пропускаются.
+
+## Сборка и проверка
+
+`make test` проверяет синтаксис и структуру проекта. `make sdk-build` собирает
+два APK через Docker/OpenWrt SDK и выгружает их в `bin/`.
+`make test-openwrt` запускает проверки обновления и дедупликации в одноразовых
+контейнерах с OpenWrt.
+
+GitHub Actions проверяет изменения в `main` и pull request, собирает оба APK
+и сохраняет их как артефакт. Для тега вида `v0.1.0-r2` workflow публикует
+GitHub Release с пакетами и контрольными суммами. Версия тега должна совпадать
+с версией обоих пакетов.
+
+Локальный стенд с LuCI, Podkop и podkop-engine:
 
 ```sh
-make sdk-build
+docker build -f docker/preview.Dockerfile -t podkop-luci-preview .
+docker run -d --name podkop-luci-preview -p 127.0.0.1:8088:80 podkop-luci-preview
 ```
 
-No package installation is performed by either command.
-
+Открой [интерфейс LuCI](http://127.0.0.1:8088/cgi-bin/luci/admin/services/podkop-subscriptions)
+и войди как `root` с паролем `podkop-preview`. Контейнер запускает отдельный
+sing-box на loopback для проверки конфигурации и интерфейса. В нём не запускаются
+DNS и правила прозрачной маршрутизации Podkop для всей сети.

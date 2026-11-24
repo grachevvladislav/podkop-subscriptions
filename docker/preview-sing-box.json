@@ -1,0 +1,6 @@
+{
+  "log": { "level": "warn" },
+  "inbounds": [{ "type": "mixed", "tag": "preview", "listen": "127.0.0.1", "listen_port": 2080 }],
+  "outbounds": [{ "type": "direct", "tag": "main-out" }],
+  "route": { "final": "main-out" }
+}

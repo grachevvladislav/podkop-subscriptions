@@ -1,11 +1,6 @@
 config settings 'main'
 	option enabled '1'
-	option target_section 'main'
-	option schedule '6h'
 	option use_proxy_on_failure '1'
-	option include_regex ''
-	option exclude_regex ''
-	list exclude_country 'RU'
 
 # Add sources in LuCI. URLs may contain secrets, so this file is root-readable.
 # config source
