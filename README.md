@@ -18,7 +18,7 @@
 Подключись к своему роутеру по SSH и выполни от `root`:
 
 ```sh
-wget -qO- https://raw.githubusercontent.com/grachevvladislav/podkop-subscriptions/main/install.sh | sh
+wget -qO- https://raw.githubusercontent.com/grachevvladislav/podkop-subscriptions/3248d26fed2b1d334739373ebfb1abb2f648ada7/install.sh | sh
 ```
 
 Установщик проверяет версию OpenWrt и архитектуру, скачивает два APK из
