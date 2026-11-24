@@ -1,0 +1,6 @@
+*.ipk
+bin/
+build/
+*.swp
+.DS_Store
+

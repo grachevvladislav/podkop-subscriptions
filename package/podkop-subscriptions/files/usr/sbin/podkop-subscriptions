@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+UPDATER=/usr/libexec/podkop-subscriptions/update
+
+case "${1:-}" in
+	update) exec "$UPDATER" update ;;
+	check) exec "$UPDATER" check ;;
+	status) exec "$UPDATER" status ;;
+	daemon) exec "$UPDATER" daemon ;;
+	*) echo "Usage: $0 {update|check|status|daemon}" >&2; exit 2 ;;
+esac
+

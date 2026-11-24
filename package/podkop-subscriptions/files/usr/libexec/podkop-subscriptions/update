@@ -1,0 +1,184 @@
+#!/bin/sh
+# shellcheck shell=ash
+set -eu
+umask 077
+
+CONFIG=podkop-subscriptions
+STATE=/etc/podkop-subscriptions
+LOCK=/tmp/podkop-subscriptions.lock
+WORK="$LOCK/work"
+SING_BOX=${SING_BOX:-/usr/bin/sing-box}
+
+say() { logger -t podkop-subscriptions -- "$*"; }
+status_write() {
+	mkdir -p "$STATE"
+	printf '%s\n' "$1" >"$STATE/status.new"
+	mv "$STATE/status.new" "$STATE/status"
+}
+die() { say "$1"; status_write "error|$(date +%s)|$1"; exit 1; }
+cleanup() { rm -rf "$LOCK"; }
+trap cleanup EXIT HUP INT TERM
+
+cfg() { uci -q get "$CONFIG.main.$1" 2>/dev/null || true; }
+schedule_seconds() {
+	case "$1" in
+		manual) echo 0 ;; 15m) echo 900 ;; 1h) echo 3600 ;; 3h) echo 10800 ;;
+		6h) echo 21600 ;; 12h) echo 43200 ;; 1d) echo 86400 ;; *) echo 21600 ;;
+	esac
+}
+
+# Convert the country code to the two regional-indicator bytes used in names.
+country_match() {
+	code=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')
+	name=$2
+	case "$code" in
+		RU) printf '%s' "$name" | grep -Eqi 'russia|росси|🇷🇺' ;;
+		US) printf '%s' "$name" | grep -Eqi 'usa|united states|🇺🇸' ;;
+		DE) printf '%s' "$name" | grep -Eqi 'germany|deutschland|🇩🇪' ;;
+		NL) printf '%s' "$name" | grep -Eqi 'netherlands|holland|🇳🇱' ;;
+		FI) printf '%s' "$name" | grep -Eqi 'finland|🇫🇮' ;;
+		*) return 1 ;;
+	esac
+}
+
+should_keep() {
+	link=$1
+	name=${link#*#}
+	[ "$name" = "$link" ] && name=""
+	include=$(cfg include_regex)
+	exclude=$(cfg exclude_regex)
+	[ -z "$include" ] || printf '%s' "$name" | grep -Eqi -- "$include" || return 1
+	[ -z "$exclude" ] || ! printf '%s' "$name" | grep -Eqi -- "$exclude" || return 1
+	for country in $(uci -q get "$CONFIG.main.exclude_country" 2>/dev/null || true); do
+		country_match "$country" "$name" && return 1
+	done
+	return 0
+}
+
+download_source() {
+	url=$1
+	if ! curl -fsSL --compressed --connect-timeout 10 --max-time 60 --max-filesize 2097152 \
+		-A 'podkop-subscriptions/0.1' "$url" -o "$WORK/raw" 2>"$WORK/curl-error"; then
+		[ "$(cfg use_proxy_on_failure)" = 1 ] || return 1
+		port=$(uci -q get podkop.main.mixed_proxy_port || echo 2080)
+		curl -fsSL --compressed --connect-timeout 15 --max-time 90 --max-filesize 2097152 \
+			-A 'podkop-subscriptions/0.1' --proxy "http://127.0.0.1:$port" "$url" -o "$WORK/raw" 2>"$WORK/curl-error" || return 1
+	fi
+	# A response can contain comments and blank lines, so inspect for a link rather
+	# than requiring the first byte to be vless://.
+	if grep -qE '^[[:space:]]*[[:alnum:]]+://' "$WORK/raw"; then
+		cp "$WORK/raw" "$WORK/text"
+	else
+		base64 -d -i "$WORK/raw" >"$WORK/text" 2>/dev/null || return 1
+	fi
+}
+
+run_update() {
+	mkdir "$LOCK" 2>/dev/null || exit 0
+	mkdir -p "$WORK" "$STATE"
+	config_load "$CONFIG"
+	: >"$WORK/links"; : >"$WORK/outbounds"; : >"$WORK/accepted"; : >"$WORK/skipped"
+	sources=0
+	config_foreach collect_source source
+	[ "$sources" -gt 0 ] || die 'No enabled subscription sources are configured'
+	input_count=$(grep -c . "$WORK/links" || true)
+	while IFS= read -r link || [ -n "$link" ]; do
+		[ -n "$link" ] || continue
+		should_keep "$link" || continue
+		printf '%s\n' "$link"
+	done <"$WORK/links" >"$WORK/unfiltered-accepted"
+	awk '!seen[$0]++' "$WORK/unfiltered-accepted" >"$WORK/filtered"
+	kept_count=$(grep -c . "$WORK/filtered" || true)
+	filtered=$((input_count - kept_count))
+	[ -s "$WORK/filtered" ] || die 'Filters left no usable links; previous configuration retained'
+	i=0; skipped=0
+	while IFS= read -r link || [ -n "$link" ]; do
+		if "$SING_BOX" tools decode-link --compact "$link" >"$WORK/one" 2>/dev/null; then
+			i=$((i + 1))
+			jq -c --arg tag "podkop-sub-$i" '.tag=$tag' "$WORK/one" >>"$WORK/outbounds"
+			printf '%s\n' "$link" >>"$WORK/accepted"
+		else
+			skipped=$((skipped + 1)); printf '%s\n' "invalid-link" >>"$WORK/skipped"
+		fi
+	done <"$WORK/filtered"
+	[ "$i" -gt 0 ] || die 'No compatible links; previous configuration retained'
+	jq -s 'sort_by(.tag)' "$WORK/outbounds" >"$WORK/fingerprint"
+	if [ -f "$STATE/fingerprint" ] && cmp -s "$WORK/fingerprint" "$STATE/fingerprint"; then
+		status_write "ok|$(date +%s)|unchanged|$i|$skipped|$filtered"
+		say "No semantic subscription changes"
+		return 0
+	fi
+	if [ "${DRY_RUN:-0}" = 1 ]; then
+		validate_candidate
+		status_write "ok|$(date +%s)|checked|$i|$skipped|$filtered"
+		say "Validated $i links; skipped=$skipped filtered=$filtered"
+		return 0
+	fi
+	apply_candidate "$i"
+	cp "$WORK/fingerprint" "$STATE/fingerprint.new" && mv "$STATE/fingerprint.new" "$STATE/fingerprint"
+	status_write "ok|$(date +%s)|applied|$i|$skipped|$filtered"
+	say "Applied $i links; skipped=$skipped filtered=$filtered"
+}
+
+collect_source() {
+	section=$1
+	[ "$(uci -q get "$CONFIG.$section.enabled")" = 1 ] || return 0
+	url=$(uci -q get "$CONFIG.$section.url")
+	case "$url" in https://*) ;; *) die "Source $section is not an HTTPS URL" ;; esac
+	sources=$((sources + 1))
+	download_source "$url" || die "Source $section download failed; previous configuration retained"
+	awk '/^[[:space:]]*[[:alnum:]]+:\/\// { sub(/^[[:space:]]+/, ""); sub(/\r$/, ""); print }' "$WORK/text" >>"$WORK/links"
+}
+
+apply_candidate() {
+	validate_candidate
+	config_path=$(uci -q get podkop.settings.config_path)
+	# Change UCI only after the candidate is fully valid. Podkop's generated JSON
+	# and UCI are replaced atomically enough for OpenWrt's local filesystem.
+	cp /etc/config/podkop "$WORK/podkop.old"; cp "$config_path" "$WORK/config.old"
+	uci -q delete podkop.main.urltest_proxy_links || true
+	while IFS= read -r link; do uci add_list "podkop.main.urltest_proxy_links=$link"; done <"$WORK/accepted"
+	uci commit podkop
+	cp "$WORK/config.json" "$config_path.new" && mv "$config_path.new" "$config_path"
+	if ! /etc/init.d/sing-box restart; then
+		cp "$WORK/podkop.old" /etc/config/podkop; cp "$WORK/config.old" "$config_path"; /etc/init.d/sing-box restart || true
+		die 'sing-box restart failed; previous configuration restored'
+	fi
+}
+
+validate_candidate() {
+	[ "$(uci -q get podkop.main.proxy_config_type)" = urltest ] || die 'Podkop main section must use URLTest'
+	config_path=$(uci -q get podkop.settings.config_path)
+	[ -n "$config_path" ] && [ -r "$config_path" ] || die 'Podkop generated configuration is unavailable'
+	interval=$(uci -q get podkop.main.urltest_check_interval || echo 5m)
+	tolerance=$(uci -q get podkop.main.urltest_tolerance || echo 100)
+	test_url=$(uci -q get podkop.main.urltest_testing_url || echo https://www.gstatic.com/generate_204)
+	jq -s --arg interval "$interval" --argjson tolerance "$tolerance" --arg url "$test_url" '
+	  . as $nodes | ($nodes | map(.tag)) as $tags |
+	  $nodes + [{type:"urltest",tag:"main-urltest-out",outbounds:$tags,url:$url,interval:$interval,tolerance:$tolerance},
+	            {type:"selector",tag:"main-out",outbounds:($tags + ["main-urltest-out"]),default:"main-urltest-out"}]' "$WORK/outbounds" >"$WORK/group"
+	jq --slurpfile group "$WORK/group" '
+	  .outbounds as $old |
+	  [$old[] | select(.tag == "main-out" or .tag == "main-urltest-out" or (.tag | startswith("podkop-sub-"))) | .tag] as $owned |
+	  .outbounds = ([$old[] | select(.tag as $tag | ($owned | index($tag) | not))] + $group[0])' "$config_path" >"$WORK/config.json"
+	"$SING_BOX" check -c "$WORK/config.json" >/dev/null 2>&1 || die 'Generated sing-box configuration is invalid'
+}
+
+show_status() { [ -r "$STATE/status" ] && cat "$STATE/status" || echo 'never|0|never|0|0|0'; }
+daemon() {
+	while :; do
+		run_update || true
+		wait="$(schedule_seconds "$(cfg schedule)")"
+		[ "$wait" -gt 0 ] || wait=3600
+		sleep "$wait"
+	done
+}
+
+case "${1:-update}" in
+	update) . /lib/functions.sh; run_update ;;
+	check) . /lib/functions.sh; DRY_RUN=1; run_update ;;
+	status) show_status ;;
+	daemon) . /lib/functions.sh; daemon ;;
+	*) exit 2 ;;
+esac
+

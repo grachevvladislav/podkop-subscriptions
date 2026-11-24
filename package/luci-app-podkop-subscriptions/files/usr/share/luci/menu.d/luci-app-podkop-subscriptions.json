@@ -1,0 +1,9 @@
+{
+  "admin/services/podkop-subscriptions": {
+    "title": "Podkop subscriptions",
+    "order": 65,
+    "action": { "type": "view", "path": "podkop-subscriptions/overview" },
+    "depends": { "acl": [ "luci-app-podkop-subscriptions" ] }
+  }
+}
+
