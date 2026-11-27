@@ -83,6 +83,39 @@ link_name() {
 		}
 	}'
 }
+
+tag_used() {
+	grep -Fxq -- "$1" "$WORK/reserved-tags" 2>/dev/null ||
+		grep -Fxq -- "$1" "$WORK/used-tags" 2>/dev/null
+}
+
+# Podkop and the Clash API show the outbound tag as the node name, so keep the
+# subscription's own label. The digest is still used to deduplicate links, and
+# only appears in the tag when two different nodes share a name.
+tag_for_link() {
+	link=$1
+	identity=$2
+	digest=$3
+	tag=$(link_name "$link" |
+		sed -e 's/[[:cntrl:]]//g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+	if [ -z "$tag" ]; then
+		tag=$(jq -r '(.type // "proxy") + " " + (.server // "?") + ":" +
+			((.server_port // 0) | tostring)' "$identity")
+	fi
+	[ -n "$tag" ] || tag="proxy"
+	if tag_used "$tag"; then
+		base=$tag
+		tag="$base [$(printf '%.8s' "$digest")]"
+		n=2
+		while tag_used "$tag"; do
+			tag="$base [$(printf '%.8s' "$digest")-$n]"
+			n=$((n + 1))
+			[ "$n" -lt 100 ] || break
+		done
+	fi
+	printf '%s\n' "$tag" >>"$WORK/used-tags"
+	printf '%s' "$tag"
+}
 should_keep() {
 	name=$1
 	[ -z "$include" ] || printf '%s' "$name" | grep -Eqi -- "$include" || return 1
@@ -200,6 +233,11 @@ run_update() {
 	[ -s "$WORK/links" ] || die 'Filters left no usable links; previous configuration retained'
 	"$SING_BOX" tools decode-link --help >/dev/null 2>&1 ||
 		die 'Installed sing-box does not support tools decode-link'
+	snapshot_podkop
+	jq -r '.outbounds[].tag' "$WORK/config.old" >"$WORK/reserved-tags" 2>/dev/null ||
+		: >"$WORK/reserved-tags"
+	printf '%s\n' main-out main-urltest-out >>"$WORK/reserved-tags"
+	: >"$WORK/used-tags"
 	i=0; skipped=0; duplicates=0
 	while IFS= read -r link || [ -n "$link" ]; do
 		if "$SING_BOX" tools decode-link --compact "$link" >"$WORK/one" 2>/dev/null &&
@@ -212,15 +250,15 @@ run_update() {
 			fi
 			: >"$WORK/identities/$digest"
 			i=$((i + 1))
-			jq -c --arg tag "podkop-sub-$digest" '.tag=$tag' "$WORK/identity" >>"$WORK/outbounds"
+			tag=$(tag_for_link "$link" "$WORK/identity" "$digest")
+			jq -c --arg tag "$tag" '.tag=$tag' "$WORK/identity" >>"$WORK/outbounds"
 			printf '%s\n' "$link" >>"$WORK/accepted"
 		else
 			skipped=$((skipped + 1))
 		fi
 	done <"$WORK/links"
 	[ "$i" -gt 0 ] || die 'No compatible links; previous configuration retained'
-	jq -sS 'map(del(.tag)) | sort | unique' "$WORK/outbounds" >"$WORK/fingerprint"
-	snapshot_podkop
+	jq -sS 'sort_by(.tag)' "$WORK/outbounds" >"$WORK/fingerprint"
 	if [ "${DRY_RUN:-0}" != 1 ] && cmp -s "$WORK/fingerprint" "$STATE/fingerprint" &&
 	   [ "$(podkop_revision)" = "$(cat "$STATE/applied-revision" 2>/dev/null || true)" ]; then
 		status_write "ok|$(date +%s)|unchanged|$i|$skipped|$filtered|$duplicates"
@@ -361,9 +399,9 @@ validate_candidate() {
 	  .outbounds as $old |
 	  [$old[] | select(.tag == "main-out" or .tag == "main-urltest-out") | .outbounds[]?] as $members |
 	  .outbounds = ([$old[] | select(.tag as $tag |
-	    ($tag == "main-out" or $tag == "main-urltest-out" or ($tag | startswith("podkop-sub-")) or
-	     (($tag | startswith("main-")) and ($tag | endswith("-out")) and
-	      ($members | index($tag) != null))) | not)] + $group[0])' \
+	    ($tag == "main-out" or $tag == "main-urltest-out" or
+	     ($tag | startswith("podkop-sub-")) or
+	     ($members | index($tag) != null)) | not)] + $group[0])' \
 		"$WORK/config.old" >"$WORK/config.json" || die 'Could not generate sing-box configuration'
 	"$SING_BOX" check -c "$WORK/config.json" >/dev/null 2>&1 || die 'Generated sing-box configuration is invalid'
 }
