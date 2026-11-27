@@ -108,8 +108,8 @@ download_source() {
 			*) download_error='Direct download failed' ;;
 		esac
 		[ "$(cfg use_proxy_on_failure)" = 1 ] || return 1
-		port=$(uci -q get podkop.main.mixed_proxy_port || echo 2080)
-		fetch_subscription --connect-timeout 15 --max-time 90 --noproxy '' --proxy "http://127.0.0.1:$port" || {
+		fetch_subscription --connect-timeout 15 --max-time 90 --noproxy '' \
+			--proxy "$(mixed_proxy_url)" || {
 				download_error="$download_error. Proxy retry failed"
 				return 1
 			}
@@ -123,6 +123,18 @@ download_source() {
 		base64 -d -i "$WORK/raw" >"$WORK/text" 2>/dev/null || return 1
 	fi
 	grep -qE "$LINK_PATTERN" "$WORK/text"
+}
+
+mixed_proxy_url() {
+	port=$(uci -q get podkop.main.mixed_proxy_port || echo 2080)
+	config=$(uci -q get podkop.settings.config_path || echo /etc/sing-box/config.json)
+	listen=$(jq -r --argjson port "$port" \
+		'.inbounds[]? | select(.type == "mixed" and .listen_port == $port) | .listen' \
+		"$config" 2>/dev/null | head -n1)
+	case "$listen" in
+		''|0.0.0.0|::) listen=127.0.0.1 ;;
+	esac
+	printf 'http://%s:%s' "$listen" "$port"
 }
 
 fetch_subscription() {
@@ -300,7 +312,12 @@ apply_candidate() {
 	cp "$WORK/snapshot/podkop" "$WORK/uci/podkop"
 	set -- uci -c "$WORK/uci" -t "$WORK/delta"
 	"$@" -q delete podkop.main.urltest_proxy_links || true
-	while IFS= read -r link; do "$@" add_list "podkop.main.urltest_proxy_links=$link"; done <"$WORK/accepted"
+	# Podkop splits this list on whitespace, so a fragment with spaces (link
+	# names from most subscriptions) would break the generated configuration.
+	while IFS= read -r link; do
+		link=$(printf '%s' "$link" | sed 's/ /%20/g; s/	/%09/g')
+		"$@" add_list "podkop.main.urltest_proxy_links=$link"
+	done <"$WORK/accepted"
 	"$@" commit podkop
 	cmp -s "$WORK/snapshot/podkop" /etc/config/podkop || die 'Podkop settings changed during update'
 	cmp -s "$WORK/config.old" "$config_path" || die 'Podkop runtime configuration changed during update'
@@ -345,7 +362,8 @@ validate_candidate() {
 	  [$old[] | select(.tag == "main-out" or .tag == "main-urltest-out") | .outbounds[]?] as $members |
 	  .outbounds = ([$old[] | select(.tag as $tag |
 	    ($tag == "main-out" or $tag == "main-urltest-out" or ($tag | startswith("podkop-sub-")) or
-	     (($tag | test("^main-[0-9]+-out$")) and ($members | index($tag) != null))) | not)] + $group[0])' \
+	     (($tag | startswith("main-")) and ($tag | endswith("-out")) and
+	      ($members | index($tag) != null))) | not)] + $group[0])' \
 		"$WORK/config.old" >"$WORK/config.json" || die 'Could not generate sing-box configuration'
 	"$SING_BOX" check -c "$WORK/config.json" >/dev/null 2>&1 || die 'Generated sing-box configuration is invalid'
 }

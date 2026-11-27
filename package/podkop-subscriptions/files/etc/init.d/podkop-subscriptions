@@ -1,7 +1,9 @@
 #!/bin/sh /etc/rc.common
 # shellcheck disable=SC2034
 
-START=98
+# After podkop (S99): the updater falls back to the local mixed proxy when the
+# subscription host is unreachable directly, and that proxy is sing-box.
+START=99
 USE_PROCD=1
 
 start_service() {
