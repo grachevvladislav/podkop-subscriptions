@@ -118,8 +118,8 @@ tag_for_link() {
 }
 should_keep() {
 	name=$1
-	[ -z "$include" ] || printf '%s' "$name" | grep -Eqi -- "$include" || return 1
-	[ -z "$exclude" ] || ! printf '%s' "$name" | grep -Eqi -- "$exclude" || return 1
+	[ -z "$include" ] || printf '%s' "$name" | grep -Eqi -- "$include" 2>/dev/null || return 1
+	[ -z "$exclude" ] || ! printf '%s' "$name" | grep -Eqi -- "$exclude" 2>/dev/null || return 1
 	for country in $countries; do
 		country_match "$country" "$name" && return 1
 	done
@@ -234,7 +234,17 @@ run_update() {
 	"$SING_BOX" tools decode-link --help >/dev/null 2>&1 ||
 		die 'Installed sing-box does not support tools decode-link'
 	snapshot_podkop
-	jq -r '.outbounds[].tag' "$WORK/config.old" >"$WORK/reserved-tags" 2>/dev/null ||
+	# Reserve only outbounds that are not part of the previous URLTest group:
+	# the group itself is replaced, and keeping its tags would force every node
+	# name to gain a digest suffix on each run.
+	jq -r '
+	  .outbounds as $old |
+	  [$old[] | select(.tag == "main-out" or .tag == "main-urltest-out") | .outbounds[]?] as $members |
+	  $old[] | select(.tag as $tag |
+	    ($tag != "main-out" and $tag != "main-urltest-out" and
+	     ($members | index($tag) == null) and
+	     ($tag | startswith("podkop-sub-") | not))) | .tag' \
+		"$WORK/config.old" >"$WORK/reserved-tags" 2>/dev/null ||
 		: >"$WORK/reserved-tags"
 	printf '%s\n' main-out main-urltest-out >>"$WORK/reserved-tags"
 	: >"$WORK/used-tags"
@@ -294,11 +304,12 @@ collect_source() {
 	exclude=$(uci -q get "$CONFIG.$section.exclude_regex" || true)
 	countries=$(uci -q get "$CONFIG.$section.exclude_country" || true)
 	for expression in "$include" "$exclude"; do
-		result=0
-		grep -Eq -- "$expression" /dev/null 2>/dev/null || result=$?
-		if [ "$result" -gt 1 ]; then
-			record_source_error 'Invalid name regex'
-			return 0
+		[ -n "$expression" ] || continue
+		if ! printf 'x\n' | grep -E -- "$expression" >/dev/null 2>"$WORK/regex.err"; then
+			if [ -s "$WORK/regex.err" ]; then
+				record_source_error 'Invalid name regex'
+				return 0
+			fi
 		fi
 	done
 	url_hash=$(printf '%s' "$url" | sha256sum)
