@@ -419,13 +419,40 @@ validate_candidate() {
 
 show_status() { [ -r "$STATE/status" ] && cat "$STATE/status" || echo 'never|0|never|0|0|0'; }
 daemon() {
+	config_path=$(uci -q get podkop.settings.config_path || echo /etc/sing-box/config.json)
+	boot=1
+	tries=0
+	boot_loops=0
 	while :; do
 		if [ -f /tmp/podkop-subscriptions.request ]; then
 			rc=0
 			"$0" update || rc=$?
 			[ "$rc" = 75 ] || rm -f /tmp/podkop-subscriptions.request
 		elif [ "$(cfg enabled)" = 1 ]; then
-			"$0" scheduled || true
+			if [ "$boot" = 1 ]; then
+				boot_loops=$((boot_loops + 1))
+				[ "$boot_loops" -gt 120 ] && boot=0
+			fi
+			if [ "$boot" = 1 ]; then
+				# Podkop rebuilds its own configuration at boot, so the applied
+				# revision stops matching and the readable outbound tags are
+				# replaced by main-N-out. Re-apply once sing-box is up instead
+				# of waiting for the next scheduled fetch.
+				if pidof sing-box >/dev/null 2>&1; then
+					if [ "$(podkop_revision 2>/dev/null)" = "$(cat "$STATE/applied-revision" 2>/dev/null || true)" ]; then
+						boot=0
+					elif "$0" update; then
+						boot=0
+					else
+						tries=$((tries + 1))
+						[ "$tries" -ge 3 ] && boot=0
+						sleep 60
+					fi
+				fi
+			else
+				boot=0
+				"$0" scheduled || true
+			fi
 		fi
 		sleep 5
 	done
